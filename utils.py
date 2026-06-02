@@ -1997,6 +1997,72 @@ def build_team_recent_snapshot(games_df: pd.DataFrame, as_of_date, windows=(5, 1
     )
     return latest
 
+
+def collect_recent_games_for_prediction(
+    target_date,
+    team_codes,
+    season_start=None,
+    min_games=10,
+    initial_days=14,
+    expansion_days=7,
+    sleep_sec=0.2,
+):
+    target_date = pd.to_datetime(target_date).normalize()
+    required_team_codes = sorted({str(team_code) for team_code in team_codes if pd.notna(team_code)})
+
+    if not required_team_codes:
+        return pd.DataFrame()
+
+    if season_start is None:
+        season_start = pd.Timestamp(year=target_date.year, month=3, day=22)
+    else:
+        season_start = pd.to_datetime(season_start).normalize()
+
+    fetch_end = target_date - timedelta(days=1)
+    if fetch_end < season_start:
+        return pd.DataFrame()
+
+    all_games = pd.DataFrame()
+    current_start = max(fetch_end - timedelta(days=initial_days - 1), season_start)
+    chunk_end = fetch_end
+
+    while True:
+        date_list = pd.date_range(current_start, chunk_end, freq="D").strftime("%Y-%m-%d").tolist()
+        if date_list:
+            fetched = collect_games(date_list, sleep_sec=sleep_sec)
+            if not fetched.empty:
+                all_games = pd.concat([all_games, fetched], ignore_index=True).drop_duplicates()
+
+        team_log = make_team_game_log_for_recent(all_games)
+        counts = (
+            team_log[team_log["team_code"].isin(required_team_codes)]
+            .groupby("team_code")
+            .size()
+            .reindex(required_team_codes, fill_value=0)
+        )
+
+        if (counts >= min_games).all() or current_start <= season_start:
+            print(
+                "[recent] lookback_start =",
+                current_start.strftime("%Y-%m-%d"),
+                "| completed_games_by_team =",
+                counts.to_dict(),
+            )
+            return all_games
+
+        next_start = max(current_start - timedelta(days=expansion_days), season_start)
+        if next_start == current_start:
+            print(
+                "[recent] lookback_start =",
+                current_start.strftime("%Y-%m-%d"),
+                "| completed_games_by_team =",
+                counts.to_dict(),
+            )
+            return all_games
+
+        chunk_end = current_start - timedelta(days=1)
+        current_start = next_start
+
 import joblib
 feature_cols_core = joblib.load("feature_cols_reduced_core.pkl")
 def add_recent_flow_features_for_prediction(pred_df: pd.DataFrame, season_start=None, sleep_sec=0.2) -> pd.DataFrame:
@@ -2008,13 +2074,24 @@ def add_recent_flow_features_for_prediction(pred_df: pd.DataFrame, season_start=
         # 2026 KBO 정규시즌 시작일 기준. 다른 시즌이면 필요시 season_start만 바꿔준다.
         season_start = f"{int(out['season'].iloc[0])}-03-22"
 
-    date_list = pd.date_range(pd.to_datetime(season_start), target_date - timedelta(days=1), freq="D").strftime("%Y-%m-%d").tolist()
-    if len(date_list) == 0:
+    if pd.to_datetime(season_start).normalize() > (target_date - timedelta(days=1)):
         for col in [c for c in feature_cols_core if c.startswith("recent_") or c in ["rest_days_diff", "prev_game_win_diff"]]:
             out[col] = 0
         return out
 
-    past_games = collect_games(date_list, sleep_sec=sleep_sec)
+    required_team_codes = pd.concat(
+        [out["home_team_code"], out["away_team_code"]],
+        ignore_index=True
+    ).astype(str).unique().tolist()
+    past_games = collect_recent_games_for_prediction(
+        target_date=target_date,
+        team_codes=required_team_codes,
+        season_start=season_start,
+        min_games=10,
+        initial_days=14,
+        expansion_days=7,
+        sleep_sec=sleep_sec,
+    )
     recent_snapshot = build_team_recent_snapshot(past_games, target_date, windows=(5, 10))
 
     recent_base_cols = [
