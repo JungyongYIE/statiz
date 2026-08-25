@@ -116,6 +116,8 @@ def fetch_game_schedule(year: int, month: int, day: int, verbose: bool = False) 
         for k, v in data.items():
             if k not in meta_keys and isinstance(v, list):
                 rows.extend(v)
+        if not rows:
+            rows.extend(numeric_key_rows(data))
 
     df = pd.DataFrame(rows)
 
@@ -139,9 +141,15 @@ def fetch_game_schedule(year: int, month: int, day: int, verbose: bool = False) 
         "awayScore": "away_score",
         "homeScore": "home_score",
         "state": "game_state",
+        "gameState": "game_state",
+        "game_state": "game_state",
+        "status": "game_state",
         "hm": "game_time",
     }
     df = df.rename(columns=rename_map)
+
+    if "game_state" not in df.columns:
+        df["game_state"] = pd.NA
 
     # game_date가 unix timestamp(초) 형태이므로 변환
     if "game_date" in df.columns:
@@ -1458,6 +1466,19 @@ def build_prediction_data_for_date(
     if verbose:
         print(f"games_df.shape = {games_df.shape}")
         display(games_df.head())
+
+    if games_df.empty:
+        raise ValueError(
+            f"{date_str} 일정이 비어 있습니다. KBO 휴식일/경기 없음/Statiz API 응답 없음 중 하나일 수 있습니다."
+        )
+
+    required_game_cols = {"game_id", "game_state"}
+    missing_game_cols = sorted(required_game_cols - set(games_df.columns))
+    if missing_game_cols:
+        raise ValueError(
+            f"gameSchedule 응답에 필수 컬럼이 없습니다: {missing_game_cols}. "
+            f"현재 컬럼: {list(games_df.columns)}"
+        )
 
     # --------------------------------------------------
     # 2) 예측 대상으로 사용할 경기 필터
