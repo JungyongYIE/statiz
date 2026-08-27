@@ -166,3 +166,74 @@ model_name, result, correct
 - `prediction_log.xlsx`는 제출 기록이 누적되는 파일입니다. 같은 `game_id`는 기본적으로 upsert됩니다.
 - Statiz API 응답 구조나 경기 상태 코드가 바뀌면 `utils.fetch_game_schedule()`, `submit.submit_one_prediction()`의 path/parameter/signature 규칙을 먼저 확인해야 합니다.
 - 일부 notebook과 과거 스크립트는 실험 과정의 산출물입니다. 운영 예측은 `app.py`, `prediction_engine.py`, `utils.py`, `elo.py`, `save_log.py`, `submit.py`를 중심으로 확인하는 것이 좋습니다.
+
+## 웹 UI 구현 내용
+
+본 프로젝트는 `prediction.ipynb`에서 수동으로 실행하던 예측 절차를 `app.py` 기반 Streamlit 웹 UI로 구현했습니다. UI의 목적은 notebook cell을 순서대로 실행하지 않아도, 날짜 선택부터 예측값 저장 및 제출까지 같은 흐름을 버튼 기반으로 재현할 수 있게 만드는 것입니다.
+
+### 구현 구조
+
+| 구성 | 설명 |
+| --- | --- |
+| `app.py` | Streamlit 화면, session state, 버튼 이벤트, 진행 상태 표시, 결과 table 렌더링을 담당합니다. |
+| `prediction_engine.py` | UI에서 호출하는 backend layer입니다. 데이터 로드, 결측 보정, feature 병합, 모델 예측, 로그 저장, 제출 API 호출을 함수 단위로 제공합니다. |
+| `run_app_anaconda.bat` | Anaconda Python 경로를 사용해 `streamlit run app.py`를 바로 실행하는 Windows 실행 파일입니다. |
+
+`app.py`는 계산 로직을 직접 많이 들고 있지 않고, 대부분의 핵심 처리를 `prediction_engine.py`에 위임합니다. 덕분에 같은 예측 로직을 UI와 notebook에서 재사용할 수 있습니다.
+
+### 화면 및 기능
+
+| 영역 | 구현 내용 |
+| --- | --- |
+| Sidebar 설정 | 예측 날짜, API 호출 간격, 최근 흐름 호출 간격, 제출 호출 간격, verbose log 여부를 설정합니다. |
+| API key check | `utils.py`와 `submit.py`가 읽는 API 설정 정보를 확인합니다. key/secret은 전체를 노출하지 않고 일부만 masking합니다. |
+| 1. 경기 데이터 불러오기 | 선택 날짜의 경기 일정, 라인업, 로스터, 선수 시즌 성적을 Statiz API에서 수집해 `pred_df`를 생성합니다. |
+| Notebook-style execution log | API 로드 중 출력되는 notebook 스타일 로그를 UI expander 안에 표시합니다. |
+| 2. 선발투수 결측치 보정 | `seaon_pit_df.csv`를 활용해 선발투수 feature 결측을 보정하고 관련 diff feature를 재계산합니다. |
+| 3. 최근 흐름 + ELO 업데이트 | 최근 경기 흐름 feature를 붙이고, `team_elo_snapshot_2026.csv`를 최신 완료 경기 기준으로 업데이트한 뒤 ELO feature를 병합합니다. |
+| 4. 모델 선택 및 예측 | `elo_full`, `elo_sp`, `elo_sp_l2` 중 하나를 선택해 홈팀 승리 확률을 계산합니다. |
+| 예측 결과 | `game_id`, 경기일, 홈/원정팀, 팀 코드, 홈/원정 승률, 모델명을 table로 표시합니다. |
+| 제출용 데이터 | `game_id`, `home_win_proba` 형태의 제출 dataframe을 표시합니다. |
+| 5. API Submit | checkbox로 실제 제출 여부를 확인한 뒤, 제출 API를 호출합니다. |
+| API 제출 결과 | 각 경기별 제출 성공/실패 결과와 API 응답 메시지를 table로 표시합니다. |
+
+### 상태 관리
+
+Streamlit rerun 특성을 고려해 `st.session_state`에 단계별 산출물을 저장합니다.
+
+```text
+pred_df
+pred_df_core
+pred_df_elo
+result_df
+submit_df
+submit_result_df
+selected_model
+log_df
+games_with_elo
+updated_snapshot
+load_logs
+```
+
+상위 단계가 다시 실행되면 downstream 결과는 `reset_downstream()`으로 초기화합니다. 예를 들어 경기 데이터를 새로 불러오면 기존 feature 병합 결과, 예측 결과, 제출 결과는 모두 비워져 이전 날짜의 결과가 섞이지 않도록 했습니다.
+
+### 사용자 경험 구현
+
+- `st.status`, `st.spinner`, `run_with_elapsed()`를 사용해 API 호출이나 모델 예측처럼 시간이 걸리는 작업의 진행 상태와 elapsed time을 표시합니다.
+- HTTP error, URL error, 빈 경기 일정 등 자주 발생할 수 있는 예외를 구분해 보여줍니다.
+- 실제 제출은 checkbox를 켜야만 버튼이 활성화되도록 해 실수 제출을 방지했습니다.
+- 예측 단계 후에는 `prediction_log.xlsx`에 자동으로 로그를 저장해 제출 전후 기록을 남깁니다.
+
+### 실행 명령
+
+```powershell
+streamlit run app.py --server.address 127.0.0.1 --server.port 8501
+```
+
+또는 Windows에서 Anaconda 환경을 사용할 경우:
+
+```powershell
+.\run_app_anaconda.bat
+```
+
+브라우저에서 `http://127.0.0.1:8501`로 접속하면 웹 UI를 사용할 수 있습니다.
