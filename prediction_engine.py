@@ -16,12 +16,14 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 import elo
+import postprocess as pp
 import save_log as sv
 import submit as sb
 import utils as ut
 
 
 ModelName = Literal["elo_full", "elo_sp", "elo_sp_l2"]
+PostprocessMethod = Literal["none", "shrink"]
 
 ROOT = Path(__file__).resolve().parent
 TEAM_CODE_TO_NAME = sv.TEAM_CODE_TO_NAME
@@ -40,6 +42,7 @@ class PredictionArtifacts:
 def reload_project_modules() -> None:
     importlib.reload(ut)
     importlib.reload(elo)
+    importlib.reload(pp)
     importlib.reload(sv)
     importlib.reload(sb)
 
@@ -213,13 +216,44 @@ def run_prediction(pred_df_elo: pd.DataFrame, model_name: ModelName) -> pd.DataF
     raise ValueError(f"지원하지 않는 모델입니다: {model_name}")
 
 
+def build_postprocess_config(method: PostprocessMethod = "none", alpha: float = 0.8) -> pp.PostprocessConfig:
+    if method == "none":
+        return pp.PostprocessConfig(method="none", name="raw")
+    if method == "shrink":
+        return pp.PostprocessConfig(method="shrink", alpha=float(alpha))
+    raise ValueError(f"지원하지 않는 후처리 방식입니다: {method}")
+
+
+def apply_postprocess(
+    result_df: pd.DataFrame,
+    method: PostprocessMethod = "none",
+    alpha: float = 0.8,
+) -> pd.DataFrame:
+    config = build_postprocess_config(method=method, alpha=alpha)
+    out = pp.apply_postprocess_to_df(
+        result_df,
+        config=config,
+        proba_col="home_win_proba",
+        result_col="result",
+        overwrite=True,
+    )
+    if method != "none" and "model_name" in out.columns and not out.empty:
+        base_model_name = str(result_df["model_name"].dropna().iloc[0]) if result_df["model_name"].notna().any() else "model"
+        out["model_name"] = f"{base_model_name}_{config.label}"
+    return out
+
+
 def make_submit_df(result_df: pd.DataFrame) -> pd.DataFrame:
     submit_df = result_df[["game_id", "home_win_proba"]].copy()
     submit_df["home_win_proba"] = submit_df["home_win_proba"].round(4) * 100
     return submit_df
 
 
-def save_prediction_log(result_df: pd.DataFrame, model_name: str) -> pd.DataFrame:
+def save_prediction_log(result_df: pd.DataFrame, model_name: str | None = None) -> pd.DataFrame:
+    if "model_name" in result_df.columns and result_df["model_name"].notna().any():
+        model_name = str(result_df["model_name"].dropna().iloc[0])
+    if model_name is None:
+        model_name = ""
     return sv.append_prediction_log(
         pred_df=result_df,
         file_path=str(ROOT / "prediction_log.xlsx"),

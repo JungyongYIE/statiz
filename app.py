@@ -27,6 +27,11 @@ MODEL_LABELS = {
     "elo_sp_l2": "elo_sp_l2",
 }
 
+POSTPROCESS_LABELS = {
+    "none": "사용 안 함",
+    "shrink": "Shrinkage",
+}
+
 
 def init_state() -> None:
     defaults = {
@@ -37,6 +42,7 @@ def init_state() -> None:
         "submit_df": None,
         "submit_result_df": None,
         "selected_model": None,
+        "selected_postprocess": None,
         "log_df": None,
         "games_with_elo": None,
         "updated_snapshot": None,
@@ -48,9 +54,9 @@ def init_state() -> None:
 
 def reset_downstream(from_step: str) -> None:
     order = {
-        "load": ["pred_df_core", "pred_df_elo", "result_df", "submit_df", "submit_result_df", "selected_model", "log_df", "games_with_elo", "updated_snapshot", "load_logs"],
-        "impute": ["pred_df_core", "pred_df_elo", "result_df", "submit_df", "submit_result_df", "selected_model", "log_df", "games_with_elo", "updated_snapshot"],
-        "features": ["result_df", "submit_df", "submit_result_df", "selected_model", "log_df"],
+        "load": ["pred_df_core", "pred_df_elo", "result_df", "submit_df", "submit_result_df", "selected_model", "selected_postprocess", "log_df", "games_with_elo", "updated_snapshot", "load_logs"],
+        "impute": ["pred_df_core", "pred_df_elo", "result_df", "submit_df", "submit_result_df", "selected_model", "selected_postprocess", "log_df", "games_with_elo", "updated_snapshot"],
+        "features": ["result_df", "submit_df", "submit_result_df", "selected_model", "selected_postprocess", "log_df"],
         "predict": ["submit_result_df", "log_df"],
     }
     for key in order[from_step]:
@@ -85,6 +91,8 @@ def display_result_table(df: pd.DataFrame) -> None:
         "away_team_code",
         "home_win_percent",
         "away_win_percent",
+        "home_win_proba_raw",
+        "postprocess_name",
         "model_name",
     ]
     show_cols = [c for c in cols if c in df.columns]
@@ -294,6 +302,20 @@ with right:
         format_func=lambda key: MODEL_LABELS[key],
         index=2,
     )
+    postprocess_method = st.selectbox(
+        "후처리 방식",
+        options=list(POSTPROCESS_LABELS.keys()),
+        format_func=lambda key: POSTPROCESS_LABELS[key],
+        index=1,
+    )
+    shrink_alpha = st.slider(
+        "Shrinkage alpha",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.8,
+        step=0.05,
+        disabled=postprocess_method != "shrink",
+    )
     if st.session_state.pred_df_elo is None:
         show_status_card("예측 준비 전", "최근 흐름과 ELO feature를 먼저 반영해주세요.", "warn")
     else:
@@ -308,18 +330,23 @@ with right:
                         st.session_state.pred_df_elo,
                         selected_model,
                     )
+                    result_df = engine.apply_postprocess(
+                        result_df,
+                        method=postprocess_method,
+                        alpha=float(shrink_alpha),
+                    )
                     submit_df = engine.make_submit_df(result_df)
                     st.write("prediction_log.xlsx 업데이트")
                     log_df = run_with_elapsed(
                         "엑셀 로그 업데이트",
                         engine.save_prediction_log,
                         result_df,
-                        selected_model,
                     )
                     st.session_state.result_df = result_df
                     st.session_state.submit_df = submit_df
                     st.session_state.log_df = log_df
                     st.session_state.selected_model = selected_model
+                    st.session_state.selected_postprocess = result_df["postprocess_name"].iloc[0]
                     status.update(label="예측 및 로그 업데이트 완료", state="complete", expanded=False)
                 st.success("예측 결과를 만들고 로컬 엑셀 로그를 업데이트했습니다.")
             except Exception as exc:

@@ -14,6 +14,10 @@ LOG_COLUMNS = [
     "home_win_percent",
     "home_win_proba",
     "model_name",
+    "confidence",
+    "confidence_bucket",
+    "prediction_side",
+    "brier_component",
     "result",
     "correct",
 ]
@@ -28,6 +32,10 @@ UPSERT_COLUMNS = [
     "home_win_percent",
     "home_win_proba",
     "model_name",
+    "confidence",
+    "confidence_bucket",
+    "prediction_side",
+    "brier_component",
 ]
 
 TEAM_CODE_TO_NAME = {
@@ -69,7 +77,7 @@ def _prepare_new_log_rows(pred_df: pd.DataFrame, model_name: str = "") -> pd.Dat
     _validate_required_columns(pred_df, required_cols)
 
     df = pred_df.copy()
-    df = df[required_cols]
+    df = df[required_cols].reset_index(drop=True)
 
     df["game_id"] = _coerce_int_series(df["game_id"], "game_id")
     df["home_team_code"] = _coerce_int_series(df["home_team_code"], "home_team_code")
@@ -87,8 +95,25 @@ def _prepare_new_log_rows(pred_df: pd.DataFrame, model_name: str = "") -> pd.Dat
     df["away_team"] = df["away_team_code"].map(TEAM_CODE_TO_NAME).fillna("")
     df["home_win_percent"] = (df["home_win_proba"] * 100).round(2)
     df["model_name"] = model_name
-    df["result"] = pd.NA
+    df["confidence"] = df["home_win_proba"].where(df["home_win_proba"] >= 0.5, 1 - df["home_win_proba"])
+    df["confidence_bucket"] = pd.cut(
+        df["confidence"],
+        bins=[0.5, 0.55, 0.60, 0.65, 0.70, 1.0],
+        labels=["50~55", "55~60", "60~65", "65~70", "70~100"],
+        include_lowest=True,
+    ).astype("object")
+    df["prediction_side"] = df["home_win_proba"].where(df["home_win_proba"] >= 0.5, pd.NA)
+    df["prediction_side"] = df["prediction_side"].notna().map({True: "HOME", False: "AWAY"})
+    result = pd.to_numeric(pred_df["result"], errors="coerce") if "result" in pred_df.columns else pd.Series(pd.NA, index=df.index)
+    result = result.reset_index(drop=True)
+    has_result = result.isin([0, 1])
+    df["result"] = result.where(has_result, pd.NA)
     df["correct"] = pd.NA
+    df.loc[has_result, "correct"] = (
+        (df.loc[has_result, "home_win_proba"] >= 0.5).astype(int) == result.loc[has_result].astype(int)
+    ).astype(int)
+    df["brier_component"] = pd.NA
+    df.loc[has_result, "brier_component"] = (result.loc[has_result] - df.loc[has_result, "home_win_proba"]) ** 2
 
     return df[LOG_COLUMNS]
 
@@ -117,7 +142,7 @@ def _append_rows_to_existing_sheet(file_path: Path, sheet_name: str, rows: list[
             ws.cell(row=row_idx, column=col_idx, value=value)
 
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:K{ws.max_row}"
+    ws.auto_filter.ref = ws.dimensions
     wb.save(file_path)
     wb.close()
 
@@ -155,7 +180,7 @@ def _upsert_rows_to_existing_sheet(file_path: Path, sheet_name: str, df: pd.Data
             ws.cell(row=target_row, column=col_idx, value=value)
 
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:K{ws.max_row}"
+    ws.auto_filter.ref = ws.dimensions
     wb.save(file_path)
     wb.close()
 
